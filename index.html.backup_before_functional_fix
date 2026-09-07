@@ -8,7 +8,7 @@
 <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700;800&family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
 <!-- Real OCR engine, loaded from CDN -->
 <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
-<script src="./api.js"></script>
+<script src="/api.js"></script>
 <style>
 /* ============ DESIGN TOKENS (IEEE AI CYBERSECURITY SOC) ============ */
 :root{
@@ -2551,11 +2551,7 @@ function wireDropzone(zone){
   const input = document.createElement('input');
   input.type='file'; input.accept = accept==='*'?'':accept; input.style.display='none';
   zone.appendChild(input);
-  zone.addEventListener('click', (e)=> {
-    if (e.target === input) return;
-    input.click();
-  });
-  input.addEventListener('click', e => e.stopPropagation());
+  zone.addEventListener('click', ()=> input.click());
   input.addEventListener('change', ()=> { if(input.files[0]) handleFile(input.files[0], kind); });
   zone.addEventListener('dragover', e=> { e.preventDefault(); zone.classList.add('drag'); });
   zone.addEventListener('dragleave', ()=> zone.classList.remove('drag'));
@@ -2567,17 +2563,12 @@ function handleFile(file, kind){
   filesStore[kind] = file;
   const prev = document.getElementById(`prev-${kind}`) || document.getElementById(`prev-up-${kind}`);
   if(prev){
-    let previewHtml = `
+    prev.innerHTML = `
       <div class="preview-row">
         <div class="preview-meta"><b>${file.name}</b><span>${(file.size/1024).toFixed(1)} KB · ${file.type||'file'}</span></div>
         <span class="soc-status-badge" style="color:var(--cyan); border-color:rgba(45,217,232,.3);">Loaded</span>
       </div>
     `;
-    if (file.type && file.type.startsWith('image/')) {
-      const imgUrl = URL.createObjectURL(file);
-      previewHtml += `<div style="margin-top:10px; text-align:center;"><img src="${imgUrl}" style="max-height:220px; max-width:100%; border-radius:8px; border:1px solid var(--line); display:inline-block;" /></div>`;
-    }
-    prev.innerHTML = previewHtml;
   }
   if(kind==='video'){
     const vp = document.getElementById('videoPreviewPlayer');
@@ -3016,10 +3007,7 @@ if (camAnalyzeCaptureBtn) {
     toast('Analyzing Frame…', 'Sending to Vision Transformer detector', 'info');
     camAnalyzeCaptureBtn.disabled = true;
     try {
-      const fd = new FormData();
-      fd.append('image', capturedCameraBlob, 'webcam_capture.jpg');
-      fd.append('file', capturedCameraBlob, 'webcam_capture.jpg');
-      const apiRes = await apiPost('/api/analyze/image', fd, true);
+      const apiRes = await window.tgAPI.analyzeCameraFrame(capturedCameraBlob);
       const norm = normalizePrediction(apiRes, 'Live Camera', 'Webcam Snapshot');
       const wrap = document.getElementById('camResult');
       if (wrap) {
@@ -3174,10 +3162,7 @@ if (liveMicAnalyzeBtn) {
     toast('Analyzing Voice…', 'Running AudioAntiSpoofCNN Mel Spectrogram', 'info');
 
     try {
-      const fd = new FormData();
-      fd.append('audio', capturedAudioBlob, 'microphone_capture.wav');
-      fd.append('file', capturedAudioBlob, 'microphone_capture.wav');
-      const apiRes = await apiPost('/api/analyze/live-audio', fd, true);
+      const apiRes = await window.tgAPI.analyzeLiveAudio(capturedAudioBlob);
       const norm = normalizePrediction(apiRes, 'Live Voice', 'Microphone Audio');
       const wrap = document.getElementById('liveMicResult');
       if (wrap) {
@@ -3237,8 +3222,7 @@ document.querySelectorAll('#scanTabs .tab-btn').forEach(btn => {
     document.querySelectorAll('.tab-panel').forEach(p=>p.classList.remove('active'));
     btn.classList.add('active');
     activeDashTab = btn.dataset.tab || 'up-image';
-    const targetPanel = document.getElementById('tab-' + activeDashTab) || document.getElementById(activeDashTab);
-    targetPanel?.classList.add('active');
+    document.getElementById(activeDashTab)?.classList.add('active');
   });
 });
 
@@ -3539,10 +3523,12 @@ document.getElementById('assistSendBtn')?.addEventListener('click', async ()=>{
   const q = inp.value.trim();
   pushUserMsg(q); inp.value='';
   try {
-    const res = await apiPost('/api/assistant', { query: q, context: lastScanContext });
-    if(res && (res.response || res.answer)) {
-      pushBotMsg(res.response || res.answer);
-      return;
+    if (window.TrustGuardAPI && typeof window.TrustGuardAPI.askAssistant === 'function') {
+      const res = await window.TrustGuardAPI.askAssistant(q, lastScanContext);
+      if(res && res.answer) {
+        pushBotMsg(res.answer);
+        return;
+      }
     }
   } catch(e) {
     console.warn("Backend assistant API fallback:", e);

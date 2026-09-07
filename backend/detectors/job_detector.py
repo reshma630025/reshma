@@ -4,8 +4,10 @@ Analyzes job descriptions for advance registration fees, security deposits,
 unrealistic salaries, free recruiter email domains, and fake offer signals.
 """
 import re
+import time
 import logging
 from typing import Dict, Any, List
+from backend.utils.response_utils import clamp_score, calculate_trust_score
 
 logger = logging.getLogger("trustguard.job_detector")
 
@@ -88,53 +90,66 @@ def analyze_job_or_internship(
             "level": "mod"
         })
 
+    start_time = time.time()
     risk_score = min(100.0, max(0.0, accumulated_risk))
+    target_name = "Internship" if is_internship else "Job"
 
     if risk_score >= 55.0:
-        classification = "FRAUDULENT"
-        confidence = min(0.96, max(0.85, 0.70 + (risk_score / 200.0)))
-        risk_level = "CRITICAL" if risk_score >= 80.0 else "VERY HIGH"
-        target_name = "Internship" if is_internship else "Job"
-        explanation = f"High-risk {target_name.lower()} posting identified with clear predatory fraud markers (such as upfront fee demands or fake recruitment channels)."
+        classification = "SCAM-LIKELY"
+        confidence_val = min(96.0, max(85.0, 70.0 + (risk_score / 2.0)))
+        risk_level = "Critical" if risk_score >= 80.0 else "High"
+        explanation = f"High-risk {target_name.lower()} solicitation identified with clear predatory markers (such as upfront fee demands or unofficial messaging recruitment)."
     elif risk_score >= 21.0:
         classification = "SUSPICIOUS"
-        confidence = 0.76
-        risk_level = "HIGH" if risk_score >= 41.0 else "MODERATE"
-        target_name = "Internship" if is_internship else "Job"
-        explanation = f"Ambiguous or suspicious {target_name.lower()} listing. Verify the employer's official careers portal directly before submitting personal data."
+        confidence_val = 76.0
+        risk_level = "Moderate"
+        explanation = f"Ambiguous {target_name.lower()} listing. Verify the employer's official careers portal directly before submitting personal data."
     else:
-        classification = "GENUINE"
-        confidence = 0.93
-        risk_level = "LOW"
+        classification = "REAL"
+        confidence_val = 93.0
+        risk_level = "Low"
         risk_score = max(5.0, risk_score)
-        target_name = "Internship" if is_internship else "Job"
-        explanation = f"Standard professional {target_name.lower()} format. No advance fee requests, predatory contracts, or fraudulent communication channels found."
+        explanation = f"Standard professional {target_name.lower()} format. Zero advance fee requests or predatory contract patterns detected."
 
-    if not matched_indicators:
-        matched_indicators = [
-            {
-                "label": "No Advance Fee Demands",
-                "detail": "Legitimate employer policy — zero upfront monetary requirements.",
-                "score": 0.0,
-                "level": "safe"
-            },
-            {
-                "label": "Standard Recruitment Format",
-                "detail": "Job duties and requirements follow verified professional industry standards.",
-                "score": 5.0,
-                "level": "safe"
-            }
-        ]
+    trust_meta = calculate_trust_score(risk_score, confidence_val, is_scam=True)
+    trust_score = trust_meta["trust_score"]
+    trust_category = trust_meta["trust_category"]
+    status = trust_meta["status"]
+    status_label = "LIKELY LEGITIMATE OFFER" if status == "REAL" else trust_meta["status_label"]
+
+    evidence_list = []
+    for ind in matched_indicators:
+        evidence_list.append(f"{ind['label']}: {ind['detail']}")
+    if not evidence_list:
+        evidence_list.append("Zero upfront registration or training fee demands detected.")
+        evidence_list.append("Recruitment process aligns with standard corporate hiring protocols.")
 
     return {
         "success": True,
+        "modality": "job",
         "type": "internship" if is_internship else "job",
+        "status": status,
+        "status_label": status_label,
         "classification": classification,
-        "confidence": round(confidence, 2),
-        "confidence_pct": round(confidence * 100, 1),
+        "prediction": classification,
+        "confidence": round(confidence_val, 1),
+        "confidence_pct": round(confidence_val, 1),
+        "trust_score": trust_score,
+        "trust_category": trust_category,
         "risk_score": round(risk_score, 1),
         "risk_level": risk_level,
+        "explanation": explanation,
+        "evidence": evidence_list,
+        "technical": {
+            "model": "Recruitment Fraud Heuristics & Domain Matcher",
+            "listing_type": target_name,
+            "text_length_chars": len(combined_text),
+            "matched_rules_count": len(matched_indicators),
+            "processing_time_sec": round(time.time() - start_time, 3)
+        },
+        "limitations": [
+            "Always verify offer letters through the organization's official domain email and corporate registrar."
+        ],
         "indicators": matched_indicators,
-        "signals": matched_indicators,
-        "explanation": explanation
+        "signals": matched_indicators
     }

@@ -4,8 +4,10 @@ Analyzes message content for financial fraud, urgent threats, credential phishin
 lottery scams, and institutional impersonation.
 """
 import re
+import time
 import logging
 from typing import Dict, Any, List
+from backend.utils.response_utils import clamp_score, calculate_trust_score
 
 logger = logging.getLogger("trustguard.text_detector")
 
@@ -51,8 +53,36 @@ SCAM_PATTERNS = [
         "regex": r"(?:wa\.me\/|t\.me\/|bit\.ly\/|tinyurl\.com\/|cutt\.ly\/|http:\/\/\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}|t\.co\/)",
         "label": "Obfuscated / Unofficial Communication Link",
         "level": "mod"
+    },
+    {
+        "category": "Multilingual (Hindi) Phishing / Coercion",
+        "weight": 40,
+        "regex": r"(?:ओटीपी|पासवर्ड|पिन|खाता\s*(?:ब्लॉक|बंद)|तुरंत|लॉटरी|इनाम|रुपये\s*(?:जीत|भेजें)|बैंक\s*खाता)",
+        "label": "Hindi Credential / Financial Coercion Trigger",
+        "level": "high"
+    },
+    {
+        "category": "Multilingual (Telugu) Phishing / Coercion",
+        "weight": 40,
+        "regex": r"(?:ఓటీపీ|పాస్‌వర్డ్|పిన్|ఖాతా\s*(?:బ్లాక్|రద్దు)|వెంటనే|లాటరీ|బహుమతి|డబ్బులు\s*(?:పంపండి|గెలుచుకున్నారు)|బ్యాంక్\s*ఖాతా)",
+        "label": "Telugu Credential / Financial Coercion Trigger",
+        "level": "high"
     }
 ]
+
+def detect_language(text: str) -> str:
+    """Identifies primary language script of text."""
+    if re.search(r"[\u0900-\u097F]", text):
+        return "Hindi (हिंदी)"
+    elif re.search(r"[\u0C00-\u0C7F]", text):
+        return "Telugu (తెలుగు)"
+    elif re.search(r"[\u0B80-\u0BFF]", text):
+        return "Tamil (தமிழ்)"
+    elif re.search(r"[\u0C80-\u0CFF]", text):
+        return "Kannada (ಕನ್ನಡ)"
+    elif re.search(r"[a-zA-Z]", text):
+        return "English"
+    return "Undetermined / Mixed"
 
 
 def analyze_text(text: str) -> Dict[str, Any]:
@@ -94,50 +124,67 @@ def analyze_text(text: str) -> Dict[str, Any]:
 
     # Risk Score & Classification Logic (0..100)
     risk_score = min(100.0, max(0.0, accumulated_risk))
+    start_time = time.time()
 
     if risk_score >= 50.0:
         classification = "SCAM"
-        confidence = min(0.98, max(0.85, 0.70 + (risk_score / 200.0)))
-        risk_level = "CRITICAL" if risk_score >= 80.0 else "VERY HIGH"
-        explanation = f"High-confidence scam pattern match. Message exhibits multiple fraudulent vectors including {matched_indicators[0]['label'].lower()}."
+        confidence_val = min(98.0, max(85.0, 70.0 + (risk_score / 2.0)))
+        risk_level = "Critical" if risk_score >= 80.0 else "High"
+        explanation = f"Detected high-confidence scam markers ({matched_indicators[0]['label']}). Do not share OTPs, passwords, or send funds."
     elif risk_score >= 21.0:
         classification = "SUSPICIOUS"
-        confidence = 0.78
-        risk_level = "HIGH" if risk_score >= 41.0 else "MODERATE"
-        explanation = f"Potential fraud or suspicious intent detected. Exercise caution before clicking links or sharing information."
+        confidence_val = 78.0
+        risk_level = "Moderate"
+        explanation = f"Potential social engineering or urgency coercion patterns detected. Exercise caution before clicking links."
     else:
-        classification = "SAFE"
-        confidence = 0.94
-        risk_level = "LOW"
+        classification = "REAL"
+        confidence_val = 94.0
+        risk_level = "Low"
         risk_score = max(4.0, risk_score)
-        explanation = "No significant fraud, phishing, urgency coercion, or scam patterns detected in message content."
+        explanation = "No credential harvesting, fraudulent wire demands, or psychological urgency triggers detected."
 
-    # If safe, provide benign positive indicators
-    if not matched_indicators:
-        matched_indicators = [
-            {
-                "label": "Legitimate Linguistic Structure",
-                "detail": "No suspicious financial requests or coercive urgency triggers identified.",
-                "score": 5.0,
-                "level": "safe"
-            },
-            {
-                "label": "Zero Credential Harvesting Patterns",
-                "detail": "No unauthorized OTP, password, or security token queries found.",
-                "score": 0.0,
-                "level": "safe"
-            }
-        ]
+    trust_meta = calculate_trust_score(risk_score, confidence_val, is_scam=True)
+    trust_score = trust_meta["trust_score"]
+    trust_category = trust_meta["trust_category"]
+    status = trust_meta["status"]
+    status_label = trust_meta["status_label"]
+
+    evidence_list = []
+    for ind in matched_indicators:
+        evidence_list.append(f"{ind['label']}: {ind['detail']}")
+    if not evidence_list:
+        evidence_list.append("Standard conversational linguistic structure verified.")
+        evidence_list.append("Zero OTP / banking credential solicitation detected.")
+
+    lang = detect_language(clean_text)
 
     return {
         "success": True,
+        "modality": "text",
         "type": "text",
+        "status": status,
+        "status_label": status_label,
         "classification": classification,
-        "confidence": round(confidence, 2),
-        "confidence_pct": round(confidence * 100, 1),
+        "prediction": classification,
+        "confidence": round(confidence_val, 1),
+        "confidence_pct": round(confidence_val, 1),
+        "trust_score": trust_score,
+        "trust_category": trust_category,
         "risk_score": round(risk_score, 1),
         "risk_level": risk_level,
+        "explanation": explanation,
+        "evidence": evidence_list,
+        "technical": {
+            "model": "Multilingual Fraud Pattern & Lexical Heuristics",
+            "detected_language": lang,
+            "text_length_chars": len(clean_text),
+            "uppercase_ratio_pct": round(caps_ratio * 100, 1),
+            "matched_rules_count": len(matched_indicators),
+            "processing_time_sec": round(time.time() - start_time, 3)
+        },
+        "limitations": [
+            "Linguistic heuristics evaluate known scam vectors; novel or targeted spear-phishing should be evaluated with external sender verification."
+        ],
         "indicators": matched_indicators,
-        "signals": matched_indicators,
-        "explanation": explanation
+        "signals": matched_indicators
     }

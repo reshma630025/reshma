@@ -8,7 +8,7 @@
 <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700;800&family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
 <!-- Real OCR engine, loaded from CDN -->
 <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
-<script src="./api.js"></script>
+<script src="/api.js"></script>
 <style>
 /* ============ DESIGN TOKENS (IEEE AI CYBERSECURITY SOC) ============ */
 :root{
@@ -2551,11 +2551,7 @@ function wireDropzone(zone){
   const input = document.createElement('input');
   input.type='file'; input.accept = accept==='*'?'':accept; input.style.display='none';
   zone.appendChild(input);
-  zone.addEventListener('click', (e)=> {
-    if (e.target === input) return;
-    input.click();
-  });
-  input.addEventListener('click', e => e.stopPropagation());
+  zone.addEventListener('click', ()=> input.click());
   input.addEventListener('change', ()=> { if(input.files[0]) handleFile(input.files[0], kind); });
   zone.addEventListener('dragover', e=> { e.preventDefault(); zone.classList.add('drag'); });
   zone.addEventListener('dragleave', ()=> zone.classList.remove('drag'));
@@ -2567,17 +2563,12 @@ function handleFile(file, kind){
   filesStore[kind] = file;
   const prev = document.getElementById(`prev-${kind}`) || document.getElementById(`prev-up-${kind}`);
   if(prev){
-    let previewHtml = `
+    prev.innerHTML = `
       <div class="preview-row">
         <div class="preview-meta"><b>${file.name}</b><span>${(file.size/1024).toFixed(1)} KB · ${file.type||'file'}</span></div>
         <span class="soc-status-badge" style="color:var(--cyan); border-color:rgba(45,217,232,.3);">Loaded</span>
       </div>
     `;
-    if (file.type && file.type.startsWith('image/')) {
-      const imgUrl = URL.createObjectURL(file);
-      previewHtml += `<div style="margin-top:10px; text-align:center;"><img src="${imgUrl}" style="max-height:220px; max-width:100%; border-radius:8px; border:1px solid var(--line); display:inline-block;" /></div>`;
-    }
-    prev.innerHTML = previewHtml;
   }
   if(kind==='video'){
     const vp = document.getElementById('videoPreviewPlayer');
@@ -3016,10 +3007,7 @@ if (camAnalyzeCaptureBtn) {
     toast('Analyzing Frame…', 'Sending to Vision Transformer detector', 'info');
     camAnalyzeCaptureBtn.disabled = true;
     try {
-      const fd = new FormData();
-      fd.append('image', capturedCameraBlob, 'webcam_capture.jpg');
-      fd.append('file', capturedCameraBlob, 'webcam_capture.jpg');
-      const apiRes = await apiPost('/api/analyze/image', fd, true);
+      const apiRes = await window.tgAPI.analyzeCameraFrame(capturedCameraBlob);
       const norm = normalizePrediction(apiRes, 'Live Camera', 'Webcam Snapshot');
       const wrap = document.getElementById('camResult');
       if (wrap) {
@@ -3174,10 +3162,7 @@ if (liveMicAnalyzeBtn) {
     toast('Analyzing Voice…', 'Running AudioAntiSpoofCNN Mel Spectrogram', 'info');
 
     try {
-      const fd = new FormData();
-      fd.append('audio', capturedAudioBlob, 'microphone_capture.wav');
-      fd.append('file', capturedAudioBlob, 'microphone_capture.wav');
-      const apiRes = await apiPost('/api/analyze/live-audio', fd, true);
+      const apiRes = await window.tgAPI.analyzeLiveAudio(capturedAudioBlob);
       const norm = normalizePrediction(apiRes, 'Live Voice', 'Microphone Audio');
       const wrap = document.getElementById('liveMicResult');
       if (wrap) {
@@ -3237,8 +3222,7 @@ document.querySelectorAll('#scanTabs .tab-btn').forEach(btn => {
     document.querySelectorAll('.tab-panel').forEach(p=>p.classList.remove('active'));
     btn.classList.add('active');
     activeDashTab = btn.dataset.tab || 'up-image';
-    const targetPanel = document.getElementById('tab-' + activeDashTab) || document.getElementById(activeDashTab);
-    targetPanel?.classList.add('active');
+    document.getElementById(activeDashTab)?.classList.add('active');
   });
 });
 
@@ -3539,10 +3523,12 @@ document.getElementById('assistSendBtn')?.addEventListener('click', async ()=>{
   const q = inp.value.trim();
   pushUserMsg(q); inp.value='';
   try {
-    const res = await apiPost('/api/assistant', { query: q, context: lastScanContext });
-    if(res && (res.response || res.answer)) {
-      pushBotMsg(res.response || res.answer);
-      return;
+    if (window.TrustGuardAPI && typeof window.TrustGuardAPI.askAssistant === 'function') {
+      const res = await window.TrustGuardAPI.askAssistant(q, lastScanContext);
+      if(res && res.answer) {
+        pushBotMsg(res.answer);
+        return;
+      }
     }
   } catch(e) {
     console.warn("Backend assistant API fallback:", e);
@@ -3691,6 +3677,207 @@ document.getElementById('clearAlertsBtn')?.addEventListener('click', () => {
   if (badgeDot) badgeDot.style.display = 'none';
   toast('Alerts Cleared', 'Alert center history reset', 'info');
 });
+
+/* ============ UPGRADED LIVE CAMERA WORKFLOW ============ */
+let capturedCameraBlob = null;
+
+// Replace camera handlers
+const origCamStart = document.getElementById('camStartBtn');
+const origCamCapture = document.getElementById('camCaptureBtn');
+const origCamAnalyze = document.getElementById('camAnalyzeCaptureBtn');
+const origCamStop = document.getElementById('camStopBtn');
+
+if (origCamCapture && origCamAnalyze) {
+  origCamCapture.onclick = () => {
+    const vid = document.getElementById('camVideo');
+    if (!vid) return;
+    const canvas = document.createElement('canvas');
+    canvas.width = vid.videoWidth || 640;
+    canvas.height = vid.videoHeight || 480;
+    canvas.getContext('2d').drawImage(vid, 0, 0);
+    canvas.toBlob(blob => {
+      capturedCameraBlob = blob;
+      const prevWrap = document.getElementById('camSnapshotPrevWrap');
+      const prevImg = document.getElementById('camSnapshotImg');
+      if (prevWrap && prevImg) {
+        prevImg.src = URL.createObjectURL(blob);
+        prevWrap.style.display = 'block';
+      }
+      origCamAnalyze.disabled = false;
+      toast('Frame Captured', 'Ready to analyze frame with Vision Transformer', 'safe');
+    }, 'image/jpeg');
+  };
+
+  origCamAnalyze.onclick = async () => {
+    if (!capturedCameraBlob) {
+      toast('No frame', 'Capture a frame first', 'warn');
+      return;
+    }
+    toast('Analyzing Frame…', 'Sending to Vision Transformer detector', 'info');
+    origCamAnalyze.disabled = true;
+    try {
+      const apiRes = await window.tgAPI.analyzeCameraFrame(capturedCameraBlob);
+      const norm = normalizePrediction(apiRes, 'Live Camera', 'Webcam Snapshot');
+      const wrap = document.getElementById('camResult');
+      if (wrap) {
+        wrap.innerHTML = renderUnifiedResultCard(norm, { contentType: 'Live Camera', contentLabel: 'Webcam Snapshot' });
+        wrap.classList.add('show');
+        attachResultActions(wrap, { ...norm, contentType: 'Live Camera', contentLabel: 'Webcam Snapshot', date: Date.now() });
+      }
+      pushHistory({ contentLabel: 'Webcam Snapshot', contentType: 'Camera', score: norm.riskScore, trust: norm.trustScore, confidence: norm.confidence, date: Date.now() });
+      triggerHighRiskAlert(norm, 'Camera', 'Webcam Snapshot');
+      toast(norm.isGenuine ? '✓ Genuine Camera Frame' : '⚠ Anomaly Detected', `Risk: ${norm.riskScore}/100`, norm.isGenuine ? 'safe' : 'danger');
+    } catch(err) {
+      toast('Camera Analysis Failed', err.message, 'danger');
+    } finally {
+      origCamAnalyze.disabled = false;
+    }
+  };
+}
+
+/* ============ UPGRADED LIVE MICROPHONE RECORDER ============ */
+liveMediaRecorder = null;
+let recordedAudioChunks = [];
+
+const liveMicStartBtn = document.getElementById('liveMicStart');
+const liveMicRecordBtn = document.getElementById('liveMicRecord');
+const liveMicStopBtn = document.getElementById('liveMicStop');
+const liveMicAnalyzeBtn = document.getElementById('liveMicAnalyze');
+const liveMicBadge = document.getElementById('liveMicStateBadge');
+let capturedAudioBlob = null;
+
+if (liveMicStartBtn) {
+  liveMicStartBtn.onclick = async () => {
+    try {
+      recordedAudioChunks = [];
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      liveMicStream = stream;
+      liveMicCtx = new (window.AudioContext || window.webkitAudioContext)();
+      const src = liveMicCtx.createMediaStreamSource(stream);
+      const analyser = liveMicCtx.createAnalyser();
+      analyser.fftSize = 256;
+      src.connect(analyser);
+
+      const canvas = document.getElementById('liveMicCanvas');
+      const ctx = canvas.getContext('2d');
+      const bufferLength = analyser.frequencyBinCount;
+      const dataArray = new Uint8Array(bufferLength);
+
+      function drawWave(){
+        liveMicRAF = requestAnimationFrame(drawWave);
+        analyser.getByteFrequencyData(dataArray);
+        ctx.fillStyle = 'rgba(18, 26, 41, 0.4)';
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+        const barWidth = (canvas.width / bufferLength) * 2.5;
+        let x = 0;
+        for(let i = 0; i < bufferLength; i++){
+          const barHeight = dataArray[i] / 2;
+          ctx.fillStyle = `rgb(${barHeight + 50}, 217, 232)`;
+          ctx.fillRect(x, canvas.height - barHeight, barWidth, barHeight);
+          x += barWidth + 1;
+        }
+      }
+      drawWave();
+
+      liveMicStartBtn.disabled = true;
+      if (liveMicRecordBtn) liveMicRecordBtn.disabled = false;
+      if (liveMicStopBtn) liveMicStopBtn.disabled = false;
+      if (liveMicBadge) { liveMicBadge.textContent = 'STATE: MONITORING…'; liveMicBadge.style.color = 'var(--cyan)'; }
+      document.getElementById('liveMicStatus').textContent = 'Microphone Status: ACTIVE (Acoustic audio stream initialized, click Record to capture)';
+      document.getElementById('liveMicStatus').style.color = 'var(--cyan)';
+      toast('Microphone Connected', 'Acoustic stream active. Click Record Audio to capture sample.', 'safe');
+    } catch(err) {
+      toast('Microphone Error', 'Microphone permission denied or audio device unavailable.', 'danger');
+    }
+  };
+
+  if (liveMicRecordBtn) {
+    liveMicRecordBtn.onclick = () => {
+      if (!liveMicStream) return;
+      recordedAudioChunks = [];
+      try {
+        liveMediaRecorder = new MediaRecorder(liveMicStream);
+        liveMediaRecorder.ondataavailable = e => {
+          if (e.data && e.data.size > 0) recordedAudioChunks.push(e.data);
+        };
+        liveMediaRecorder.start(250);
+        liveMicRecordBtn.disabled = true;
+        if (liveMicStopBtn) liveMicStopBtn.disabled = false;
+        if (liveMicBadge) { liveMicBadge.textContent = 'STATE: RECORDING…'; liveMicBadge.style.color = 'var(--danger-2)'; }
+        document.getElementById('liveMicStatus').textContent = 'Microphone Status: RECORDING (Capturing speech audio buffer)';
+        document.getElementById('liveMicStatus').style.color = 'var(--danger-2)';
+        toast('Recording Audio', 'Capturing voice sample for Anti-Spoofing analysis', 'info');
+      } catch(e) {
+        toast('Recorder Error', e.message, 'danger');
+      }
+    };
+  }
+
+  if (liveMicStopBtn) {
+    liveMicStopBtn.onclick = () => {
+      if (liveMediaRecorder && liveMediaRecorder.state !== 'inactive') {
+        liveMediaRecorder.onstop = () => {
+          capturedAudioBlob = new Blob(recordedAudioChunks, { type: 'audio/wav' });
+          if (liveMicAnalyzeBtn) liveMicAnalyzeBtn.disabled = false;
+          if (liveMicBadge) { liveMicBadge.textContent = 'STATE: RECORDED'; liveMicBadge.style.color = 'var(--safe)'; }
+          document.getElementById('liveMicStatus').textContent = `Microphone Status: RECORDED (${(capturedAudioBlob.size / 1024).toFixed(1)} KB buffer captured, ready for analysis)`;
+          document.getElementById('liveMicStatus').style.color = 'var(--safe)';
+          toast('Recording Stopped', 'Voice audio buffer captured. Click Analyze Recording.', 'safe');
+        };
+        liveMediaRecorder.stop();
+      } else {
+        if (liveMicStream) liveMicStream.getTracks().forEach(t => t.stop());
+        if (liveMicCtx) liveMicCtx.close();
+        cancelAnimationFrame(liveMicRAF);
+        liveMicStartBtn.disabled = false;
+        if (liveMicRecordBtn) liveMicRecordBtn.disabled = true;
+        liveMicStopBtn.disabled = true;
+        if (liveMicBadge) { liveMicBadge.textContent = 'STATE: STOPPED'; liveMicBadge.style.color = 'var(--text-faint)'; }
+        document.getElementById('liveMicStatus').textContent = 'Microphone Status: STOPPED';
+        document.getElementById('liveMicStatus').style.color = 'var(--text-dim)';
+      }
+    };
+  }
+
+  if (liveMicAnalyzeBtn) {
+    liveMicAnalyzeBtn.onclick = async () => {
+      if (!capturedAudioBlob && recordedAudioChunks.length > 0) {
+        capturedAudioBlob = new Blob(recordedAudioChunks, { type: 'audio/wav' });
+      }
+      if (!capturedAudioBlob) {
+        toast('No audio recorded', 'Record an audio sample first', 'warn');
+        return;
+      }
+      liveMicAnalyzeBtn.disabled = true;
+      if (liveMicBadge) { liveMicBadge.textContent = 'STATE: ANALYZING…'; liveMicBadge.style.color = 'var(--warn)'; }
+      document.getElementById('liveMicStatus').textContent = 'Microphone Status: ANALYZING (Running AudioAntiSpoofCNN Mel Spectrogram)';
+      document.getElementById('liveMicStatus').style.color = 'var(--warn)';
+      toast('Analyzing Voice…', 'Running AudioAntiSpoofCNN Mel Spectrogram', 'info');
+
+      try {
+        const apiRes = await window.tgAPI.analyzeLiveAudio(capturedAudioBlob);
+        const norm = normalizePrediction(apiRes, 'Live Voice', 'Microphone Audio');
+        const wrap = document.getElementById('liveMicResult');
+        if (wrap) {
+          wrap.innerHTML = renderUnifiedResultCard(norm, { contentType: 'Live Voice', contentLabel: 'Microphone Stream Sample' });
+          wrap.classList.add('show');
+          attachResultActions(wrap, { ...norm, contentType: 'Live Voice', contentLabel: 'Microphone Stream Sample', date: Date.now() });
+        }
+        pushHistory({ contentLabel: 'Microphone Stream Sample', contentType: 'Audio', score: norm.riskScore, trust: norm.trustScore, confidence: norm.confidence, date: Date.now() });
+        triggerHighRiskAlert(norm, 'Live Voice', 'Microphone Stream Sample');
+        toast(norm.isGenuine ? '✓ Authentic Human Voice' : '⚠ Synthetic Voice Flagged', `Risk: ${norm.riskScore}/100`, norm.isGenuine ? 'safe' : 'danger');
+      } catch(err) {
+        toast('Voice Analysis Failed', err.message, 'danger');
+      } finally {
+        liveMicAnalyzeBtn.disabled = false;
+        liveMicStartBtn.disabled = false;
+        if (liveMicBadge) { liveMicBadge.textContent = 'STATE: READY'; liveMicBadge.style.color = 'var(--text-faint)'; }
+        document.getElementById('liveMicStatus').textContent = 'Microphone Status: READY';
+        document.getElementById('liveMicStatus').style.color = 'var(--text-dim)';
+      }
+    };
+  }
+}
 
 /* ============ INITIALIZATION ============ */
 window.addEventListener('load', async ()=>{

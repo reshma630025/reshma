@@ -32,6 +32,7 @@ INDEX_HTML_CONTENT = r'''<!DOCTYPE html>
   --panel:#0e1420;
   --panel-2:#121a29;
   --glass:rgba(20,28,44,.65);
+  
   --glass-brd:rgba(120,150,200,.14);
   --line:rgba(140,165,210,.12);
   --cyan:#2dd9e8;

@@ -15,16 +15,24 @@ from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Request, Dep
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, FileResponse
 
-from backend.detectors.image_detector import analyze_image_bytes, MODEL_NAME as IMAGE_MODEL_NAME, get_pipeline
+from backend.detectors.image_detector import (
+    analyze_image_bytes, MODEL_NAME as IMAGE_MODEL_NAME, get_pipeline,
+    load_models as load_image_models, TRAINED_MODEL as IMAGE_TRAINED_MODEL
+)
 from backend.detectors.video_detector import analyze_video_file
-from backend.detectors.audio_detector import analyze_audio_bytes
+from backend.detectors.audio_detector import (
+    analyze_audio_bytes, load_models as load_audio_models,
+    TRAINED_AUDIO_MODEL
+)
 from backend.detectors.text_detector import analyze_text
 from backend.detectors.job_detector import analyze_job_or_internship
 from backend.detectors.url_detector import analyze_url
 from backend.detectors.ocr_detector import analyze_ocr_text
 from backend.detectors.company_detector import verify_company
 from backend.detectors.social_detector import analyze_social_post
-from backend.utils.history_db import record_scan, get_stats, get_history, clear_history
+from backend.detectors.assistant_engine import analyze_assistant_query
+from backend.utils.history_db import record_scan, get_stats, get_history, clear_history, get_scan_by_id
+from backend.utils.reports_db import create_report, get_reports, get_report_by_id
 from backend.utils.auth_db import (
     register_user, login_user, logout_user,
     get_user_by_token, update_user_profile
@@ -49,6 +57,19 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+@app.on_event("startup")
+def startup_event():
+    logger.info("Initializing TrustGuard AI detection models...")
+    try:
+        load_image_models()
+    except Exception as e:
+        logger.warning(f"Image model preloader notice: {e}")
+    try:
+        load_audio_models()
+    except Exception as e:
+        logger.warning(f"Audio model preloader notice: {e}")
+    logger.info("TrustGuard AI models initialized.")
 
 
 async def extract_request_data(request: Request) -> dict:
@@ -117,6 +138,14 @@ def read_firebase_js():
     if js_file.exists():
         return FileResponse(str(js_file), media_type="application/javascript")
     raise HTTPException(status_code=404, detail="firebase.js not found")
+
+
+@app.get("/api.js")
+def read_api_js():
+    js_file = PROJECT_ROOT / "api.js"
+    if js_file.exists():
+        return FileResponse(str(js_file), media_type="application/javascript")
+    raise HTTPException(status_code=404, detail="api.js not found")
 
 
 # Dedicated SPA routes so direct navigation and refreshes return index.html
@@ -219,6 +248,34 @@ async def update_profile_endpoint(request: Request):
 
 
 # ============================================================
+# ROOT & STATIC ASSET ROUTES
+# ============================================================
+
+@app.get("/")
+def serve_index():
+    index_path = PROJECT_ROOT / "index.html"
+    if index_path.exists():
+        return FileResponse(str(index_path))
+    return {"message": "TrustGuard AI API operational"}
+
+
+@app.get("/api.js")
+def serve_api_js():
+    js_path = PROJECT_ROOT / "api.js"
+    if js_path.exists():
+        return FileResponse(str(js_path), media_type="application/javascript")
+    return JSONResponse(status_code=404, content={"error": "api.js not found"})
+
+
+@app.get("/firebase.js")
+def serve_firebase_js():
+    fb_path = PROJECT_ROOT / "firebase.js"
+    if fb_path.exists():
+        return FileResponse(str(fb_path), media_type="application/javascript")
+    return JSONResponse(status_code=404, content={"error": "firebase.js not found"})
+
+
+# ============================================================
 # HEALTH & STATS ENDPOINTS
 # ============================================================
 
@@ -233,21 +290,28 @@ def get_health():
 
 @app.get("/api/status")
 def get_status():
-    pipe = get_pipeline()
-    model_ready = pipe is not None
+    img_ready = IMAGE_TRAINED_MODEL.exists()
+    aud_ready = TRAINED_AUDIO_MODEL.exists()
     return {
         "status": "online",
         "engine": "Real Pretrained & Multi-Signal Models",
-        "imageModel": IMAGE_MODEL_NAME,
-        "imageModelReady": model_ready,
-        "videoModelReady": model_ready,
-        "audioModelReady": True,
+        "imageModel": "DeepfakeCNN (Trained on 1000 Videos Dataset)" if img_ready else IMAGE_MODEL_NAME,
+        "imageModelReady": img_ready,
+        "imageModelLoaded": img_ready,
+        "videoModelReady": img_ready,
+        "videoModelLoaded": img_ready,
+        "audioModel": "AudioCNN (Trained on ASVspoof 2019 LA)" if aud_ready else "STFT Spectral Forensics",
+        "audioModelReady": aud_ready or True,
+        "audioModelLoaded": aud_ready,
         "textModelReady": True,
         "jobModelReady": True,
         "urlModelReady": True,
         "ocrModelReady": True,
         "companyModelReady": True,
-        "socialModelReady": True
+        "socialModelReady": True,
+        "multimodalReady": True,
+        "assistantReady": True,
+        "reportsReady": True
     }
 
 
@@ -259,15 +323,21 @@ def get_live_stats(request: Request):
     return {
         "success": True,
         "stats": {
-            "total_scans": stats.get("scans", 0),
+            "total_scans": stats.get("total_scans", 0),
             "threats_flagged": stats.get("threats", 0),
             "deepfakes_detected": stats.get("deepfakes", 0),
-            "scams_neutralized": stats.get("scams", 0)
+            "scams_neutralized": stats.get("scams", 0),
+            "average_trust_score": stats.get("average_trust_score", 85.0),
+            "authentic": stats.get("authentic", 0),
+            "ai_generated": stats.get("ai_generated", 0),
+            "uncertain": stats.get("uncertain", 0)
         },
-        "scans": stats.get("scans", 0),
+        "total_scans": stats.get("total_scans", 0),
+        "scans": stats.get("total_scans", 0),
         "threats": stats.get("threats", 0),
         "deepfakes": stats.get("deepfakes", 0),
-        "scams": stats.get("scams", 0)
+        "scams": stats.get("scams", 0),
+        "average_trust_score": stats.get("average_trust_score", 85.0)
     }
 
 
@@ -278,7 +348,8 @@ def get_live_history(request: Request, limit: int = 50):
     history = get_history(user_id=u_id, limit=limit)
     return {
         "success": True,
-        "history": history
+        "history": history,
+        "total": len(history)
     }
 
 
@@ -288,6 +359,14 @@ def clear_all_history(request: Request):
     u_id = user["id"] if user else None
     clear_history(user_id=u_id)
     return {"success": True, "message": "History cleared."}
+
+
+@app.get("/api/scan/{scan_id}")
+def get_single_scan(scan_id: int):
+    scan = get_scan_by_id(scan_id)
+    if not scan:
+        raise HTTPException(status_code=404, detail=f"Scan record #{scan_id} not found.")
+    return {"success": True, "scan": scan}
 
 
 # ============================================================
@@ -315,10 +394,12 @@ async def analyze_image_endpoint(request: Request, image: Optional[UploadFile] =
             record_scan(
                 scan_type="image",
                 content_label=target.filename or "Uploaded Image",
-                classification=result.get("classification", "UNKNOWN"),
+                classification=result.get("status") or result.get("classification", "UNKNOWN"),
                 confidence=result.get("confidence", 0.0),
                 risk_score=result.get("risk_score", 0.0),
                 risk_level=result.get("risk_level", "LOW"),
+                trust_score=result.get("trust_score"),
+                trust_category=result.get("trust_category"),
                 user_id=u_id,
                 explanation=result.get("explanation", ""),
                 indicators_json=json.dumps(result.get("indicators", []))
@@ -327,6 +408,40 @@ async def analyze_image_endpoint(request: Request, image: Optional[UploadFile] =
     except Exception as e:
         logger.error(f"Error in /api/analyze/image: {e}", exc_info=True)
         return JSONResponse(status_code=500, content={"success": False, "error": f"Image analysis failed: {str(e)}"})
+
+
+@app.post("/api/analyze/camera")
+async def analyze_camera_endpoint(request: Request, image: Optional[UploadFile] = File(None), file: Optional[UploadFile] = File(None)):
+    target = file or image
+    if not target:
+        raise HTTPException(status_code=400, detail="No camera snapshot uploaded.")
+    user = extract_user_from_request(request)
+    u_id = user["id"] if user else 1
+    try:
+        content = await target.read()
+        if len(content) == 0:
+            return JSONResponse(status_code=400, content={"success": False, "error": "Captured camera snapshot is empty."})
+        result = analyze_image_bytes(content)
+        result["fileName"] = "camera_snapshot.jpg"
+        result["modality"] = "camera"
+        if result.get("success"):
+            record_scan(
+                scan_type="camera",
+                content_label="Live Camera Snapshot",
+                classification=result.get("status") or result.get("classification", "UNKNOWN"),
+                confidence=result.get("confidence", 0.0),
+                risk_score=result.get("risk_score", 0.0),
+                risk_level=result.get("risk_level", "LOW"),
+                trust_score=result.get("trust_score"),
+                trust_category=result.get("trust_category"),
+                user_id=u_id,
+                explanation=result.get("explanation", ""),
+                indicators_json=json.dumps(result.get("indicators", []))
+            )
+        return result
+    except Exception as e:
+        logger.error(f"Error in /api/analyze/camera: {e}", exc_info=True)
+        return JSONResponse(status_code=500, content={"success": False, "error": f"Camera analysis failed: {str(e)}"})
 
 
 # ============================================================
@@ -354,10 +469,12 @@ async def analyze_video_endpoint(request: Request, video: Optional[UploadFile] =
             record_scan(
                 scan_type="video",
                 content_label=target.filename or "Uploaded Video",
-                classification=result.get("classification", "UNKNOWN"),
-                confidence=result.get("confidence_pct", 0.0),
-                risk_score=result.get("risk_score", result.get("fakeProbability", 0.0)),
+                classification=result.get("status") or result.get("classification", "UNKNOWN"),
+                confidence=result.get("confidence_pct", result.get("confidence", 0.0)),
+                risk_score=result.get("risk_score", 0.0),
                 risk_level=result.get("risk_level", "LOW"),
+                trust_score=result.get("trust_score"),
+                trust_category=result.get("trust_category"),
                 user_id=u_id,
                 explanation=result.get("explanation", ""),
                 indicators_json=json.dumps(result.get("indicators", [])),
@@ -391,10 +508,12 @@ async def analyze_audio_endpoint(request: Request, audio: Optional[UploadFile] =
             record_scan(
                 scan_type="audio",
                 content_label=target.filename or "Audio Recording",
-                classification=result.get("classification", "UNKNOWN"),
-                confidence=result.get("confidence_pct", 0.0),
+                classification=result.get("status") or result.get("classification", "UNKNOWN"),
+                confidence=result.get("confidence_pct", result.get("confidence", 0.0)),
                 risk_score=result.get("risk_score", 0.0),
                 risk_level=result.get("risk_level", "LOW"),
+                trust_score=result.get("trust_score"),
+                trust_category=result.get("trust_category"),
                 user_id=u_id,
                 explanation=result.get("explanation", ""),
                 indicators_json=json.dumps(result.get("indicators", [])),
@@ -404,6 +523,41 @@ async def analyze_audio_endpoint(request: Request, audio: Optional[UploadFile] =
     except Exception as e:
         logger.error(f"Error in /api/analyze/audio: {e}", exc_info=True)
         return JSONResponse(status_code=500, content={"success": False, "error": f"Audio analysis failed: {str(e)}"})
+
+
+@app.post("/api/analyze/live-audio")
+async def analyze_live_audio_endpoint(request: Request, audio: Optional[UploadFile] = File(None), file: Optional[UploadFile] = File(None)):
+    target = file or audio
+    if not target:
+        raise HTTPException(status_code=400, detail="No live audio stream uploaded.")
+    user = extract_user_from_request(request)
+    u_id = user["id"] if user else 1
+    try:
+        content = await target.read()
+        if len(content) == 0:
+            return JSONResponse(status_code=400, content={"success": False, "error": "Live audio sample is empty."})
+        result = analyze_audio_bytes(content)
+        result["fileName"] = target.filename or "live_recording.wav"
+        result["modality"] = "live_audio"
+        if result.get("success"):
+            record_scan(
+                scan_type="live_audio",
+                content_label="Live Microphone Sample",
+                classification=result.get("status") or result.get("classification", "UNKNOWN"),
+                confidence=result.get("confidence_pct", result.get("confidence", 0.0)),
+                risk_score=result.get("risk_score", 0.0),
+                risk_level=result.get("risk_level", "LOW"),
+                trust_score=result.get("trust_score"),
+                trust_category=result.get("trust_category"),
+                user_id=u_id,
+                explanation=result.get("explanation", ""),
+                indicators_json=json.dumps(result.get("indicators", [])),
+                segment_results_json=json.dumps(result.get("segment_results", []))
+            )
+        return result
+    except Exception as e:
+        logger.error(f"Error in /api/analyze/live-audio: {e}", exc_info=True)
+        return JSONResponse(status_code=500, content={"success": False, "error": f"Live audio analysis failed: {str(e)}"})
 
 
 # ============================================================
@@ -426,10 +580,12 @@ async def analyze_text_endpoint(request: Request):
             record_scan(
                 scan_type="text",
                 content_label=str(input_text)[:40] + ("..." if len(str(input_text)) > 40 else ""),
-                classification=result.get("classification", "SAFE"),
-                confidence=result.get("confidence_pct", 0.0),
+                classification=result.get("status") or result.get("classification", "SAFE"),
+                confidence=result.get("confidence_pct", result.get("confidence", 0.0)),
                 risk_score=result.get("risk_score", 0.0),
                 risk_level=result.get("risk_level", "LOW"),
+                trust_score=result.get("trust_score"),
+                trust_category=result.get("trust_category"),
                 user_id=u_id,
                 explanation=result.get("explanation", ""),
                 indicators_json=json.dumps(result.get("indicators", []))
@@ -448,24 +604,43 @@ async def analyze_text_endpoint(request: Request):
 async def analyze_job_endpoint(request: Request):
     data = await extract_request_data(request)
     desc = data.get("description", "") or data.get("desc", "") or data.get("text", "")
-    u = data.get("url", "")
-    em = data.get("email", "")
+    title = data.get("title", "")
+    company = data.get("company", "")
+    salary = data.get("salary", "")
+    location = data.get("location", "")
+    fee = data.get("fee", "") or data.get("registration_fee", "")
+    phone = data.get("phone", "")
+    u = data.get("url", "") or data.get("website", "")
+    em = data.get("email", "") or data.get("contact_email", "")
+
+    parts = []
+    if title: parts.append(f"Job Title: {title}")
+    if company: parts.append(f"Company: {company}")
+    if salary: parts.append(f"Salary: {salary}")
+    if location: parts.append(f"Location: {location}")
+    if fee: parts.append(f"Registration Fee: {fee}")
+    if phone: parts.append(f"Contact Phone: {phone}")
+    if desc: parts.append(str(desc))
+    combined_desc = "\n".join(parts) if parts else str(desc)
+
     user = extract_user_from_request(request)
     u_id = user["id"] if user else 1
 
-    if not desc and not u and not em:
+    if not combined_desc and not u and not em:
         raise HTTPException(status_code=400, detail="No job details provided.")
 
     try:
-        result = analyze_job_or_internship(description=str(desc), url=str(u), email=str(em), is_internship=False)
+        result = analyze_job_or_internship(description=combined_desc, url=str(u), email=str(em), is_internship=False)
         if result.get("success"):
             record_scan(
                 scan_type="job",
-                content_label=str(desc)[:40] if desc else "Job Listing",
-                classification=result.get("classification", "GENUINE"),
-                confidence=result.get("confidence_pct", 0.0),
+                content_label=(title or str(desc))[:40] if (title or desc) else "Job Listing",
+                classification=result.get("status") or result.get("classification", "GENUINE"),
+                confidence=result.get("confidence_pct", result.get("confidence", 0.0)),
                 risk_score=result.get("risk_score", 0.0),
                 risk_level=result.get("risk_level", "LOW"),
+                trust_score=result.get("trust_score"),
+                trust_category=result.get("trust_category"),
                 user_id=u_id,
                 explanation=result.get("explanation", ""),
                 indicators_json=json.dumps(result.get("indicators", []))
@@ -480,21 +655,40 @@ async def analyze_job_endpoint(request: Request):
 async def analyze_internship_endpoint(request: Request):
     data = await extract_request_data(request)
     desc = data.get("description", "") or data.get("desc", "") or data.get("text", "")
-    u = data.get("url", "")
-    em = data.get("email", "")
+    title = data.get("title", "")
+    company = data.get("company", "")
+    salary = data.get("salary", "")
+    location = data.get("location", "")
+    fee = data.get("fee", "") or data.get("registration_fee", "")
+    phone = data.get("phone", "")
+    u = data.get("url", "") or data.get("website", "")
+    em = data.get("email", "") or data.get("contact_email", "")
+
+    parts = []
+    if title: parts.append(f"Internship Title: {title}")
+    if company: parts.append(f"Company: {company}")
+    if salary: parts.append(f"Stipend/Salary: {salary}")
+    if location: parts.append(f"Location: {location}")
+    if fee: parts.append(f"Registration Fee: {fee}")
+    if phone: parts.append(f"Contact Phone: {phone}")
+    if desc: parts.append(str(desc))
+    combined_desc = "\n".join(parts) if parts else str(desc)
+
     user = extract_user_from_request(request)
     u_id = user["id"] if user else 1
 
     try:
-        result = analyze_job_or_internship(description=str(desc), url=str(u), email=str(em), is_internship=True)
+        result = analyze_job_or_internship(description=combined_desc, url=str(u), email=str(em), is_internship=True)
         if result.get("success"):
             record_scan(
                 scan_type="internship",
-                content_label=str(desc)[:40] if desc else "Internship Posting",
-                classification=result.get("classification", "GENUINE"),
-                confidence=result.get("confidence_pct", 0.0),
+                content_label=(title or str(desc))[:40] if (title or desc) else "Internship Posting",
+                classification=result.get("status") or result.get("classification", "GENUINE"),
+                confidence=result.get("confidence_pct", result.get("confidence", 0.0)),
                 risk_score=result.get("risk_score", 0.0),
                 risk_level=result.get("risk_level", "LOW"),
+                trust_score=result.get("trust_score"),
+                trust_category=result.get("trust_category"),
                 user_id=u_id,
                 explanation=result.get("explanation", ""),
                 indicators_json=json.dumps(result.get("indicators", []))
@@ -525,10 +719,12 @@ async def analyze_url_endpoint(request: Request):
             record_scan(
                 scan_type="url",
                 content_label=str(target_url)[:50],
-                classification=result.get("classification", "SAFE"),
-                confidence=result.get("confidence_pct", 0.0),
+                classification=result.get("status") or result.get("classification", "SAFE"),
+                confidence=result.get("confidence_pct", result.get("confidence", 0.0)),
                 risk_score=result.get("risk_score", 0.0),
                 risk_level=result.get("risk_level", "LOW"),
+                trust_score=result.get("trust_score"),
+                trust_category=result.get("trust_category"),
                 user_id=u_id,
                 explanation=result.get("explanation", ""),
                 indicators_json=json.dumps(result.get("indicators", []))
@@ -659,6 +855,245 @@ async def analyze_social_endpoint(request: Request):
     except Exception as e:
         logger.error(f"Error in /api/analyze/social: {e}", exc_info=True)
         return JSONResponse(status_code=500, content={"success": False, "error": f"Social media analysis failed: {str(e)}"})
+
+
+# ============================================================
+# 10. MULTIMODAL UNIFIED FRAUD & CONTENT ANALYSIS
+# ============================================================
+
+@app.post("/api/analyze/multimodal")
+async def analyze_multimodal_endpoint(
+    request: Request,
+    image: Optional[UploadFile] = File(None),
+    audio: Optional[UploadFile] = File(None),
+    video: Optional[UploadFile] = File(None),
+    file: Optional[UploadFile] = File(None),
+    text: Optional[str] = Form(None),
+    url: Optional[str] = Form(None)
+):
+    user = extract_user_from_request(request)
+    u_id = user["id"] if user else 1
+
+    modalities_analyzed = {}
+    evidence_collected = []
+    risk_scores = []
+    confidences = []
+    indicators_all = []
+
+    # Infer file type if single file uploaded
+    target_file = file
+    if target_file and not (image or audio or video):
+        fname = (target_file.filename or "").lower()
+        if fname.endswith((".jpg", ".jpeg", ".png", ".webp", ".bmp")):
+            image = target_file
+        elif fname.endswith((".wav", ".mp3", ".flac", ".ogg", ".m4a", ".aac")):
+            audio = target_file
+        elif fname.endswith((".mp4", ".mov", ".avi", ".webm", ".mkv")):
+            video = target_file
+
+    # Image analysis
+    if image:
+        try:
+            content = await image.read()
+            if len(content) > 0:
+                res_img = analyze_image_bytes(content)
+                if res_img.get("success"):
+                    modalities_analyzed["image"] = res_img
+                    risk_scores.append(res_img.get("risk_score", 0.0))
+                    confidences.append(res_img.get("confidence_pct", res_img.get("confidence", 80.0)))
+                    evidence_collected.append(f"Image ({image.filename or 'image'}): {res_img.get('explanation', '')}")
+                    indicators_all.extend(res_img.get("indicators", []))
+        except Exception as e:
+            logger.warning(f"Multimodal image analysis error: {e}")
+
+    # Audio analysis
+    if audio:
+        try:
+            content = await audio.read()
+            if len(content) > 0:
+                res_aud = analyze_audio_bytes(content)
+                if res_aud.get("success"):
+                    modalities_analyzed["audio"] = res_aud
+                    risk_scores.append(res_aud.get("risk_score", 0.0))
+                    confidences.append(res_aud.get("confidence_pct", res_aud.get("confidence", 80.0)))
+                    evidence_collected.append(f"Audio ({audio.filename or 'audio'}): {res_aud.get('explanation', '')}")
+                    indicators_all.extend(res_aud.get("indicators", []))
+        except Exception as e:
+            logger.warning(f"Multimodal audio analysis error: {e}")
+
+    # Video analysis
+    if video:
+        try:
+            content = await video.read()
+            if len(content) > 0:
+                res_vid = analyze_video_file(content)
+                if res_vid.get("success"):
+                    modalities_analyzed["video"] = res_vid
+                    risk_scores.append(res_vid.get("risk_score", 0.0))
+                    confidences.append(res_vid.get("confidence_pct", res_vid.get("confidence", 80.0)))
+                    evidence_collected.append(f"Video ({video.filename or 'video'}): {res_vid.get('explanation', '')}")
+                    indicators_all.extend(res_vid.get("indicators", []))
+        except Exception as e:
+            logger.warning(f"Multimodal video analysis error: {e}")
+
+    # Text analysis
+    if text and text.strip():
+        try:
+            res_txt = analyze_text(text.strip())
+            if res_txt.get("success"):
+                modalities_analyzed["text"] = res_txt
+                risk_scores.append(res_txt.get("risk_score", 0.0))
+                confidences.append(res_txt.get("confidence_pct", 85.0))
+                evidence_collected.append(f"Text: {res_txt.get('explanation', '')}")
+                indicators_all.extend(res_txt.get("indicators", []))
+        except Exception as e:
+            logger.warning(f"Multimodal text analysis error: {e}")
+
+    # URL analysis
+    if url and url.strip():
+        try:
+            res_url = analyze_url(url.strip())
+            if res_url.get("success"):
+                modalities_analyzed["url"] = res_url
+                risk_scores.append(res_url.get("risk_score", 0.0))
+                confidences.append(res_url.get("confidence_pct", 85.0))
+                evidence_collected.append(f"URL ({url}): {res_url.get('explanation', '')}")
+                indicators_all.extend(res_url.get("indicators", []))
+        except Exception as e:
+            logger.warning(f"Multimodal url analysis error: {e}")
+
+    if not modalities_analyzed:
+        raise HTTPException(
+            status_code=400,
+            detail="No valid multimodal inputs provided. Provide at least one of 'image', 'audio', 'video', 'text', 'url', or 'file'."
+        )
+
+    # Cross-modal fusion: weighted towards maximum detected threat
+    from backend.utils.response_utils import calculate_trust_score, clamp_score
+    max_risk = max(risk_scores)
+    avg_risk = sum(risk_scores) / len(risk_scores)
+    fused_risk = round(0.65 * max_risk + 0.35 * avg_risk, 1)
+    fused_conf = round(sum(confidences) / len(confidences), 1)
+
+    trust_meta = calculate_trust_score(fused_risk, fused_conf, is_scam=False)
+    trust_score = trust_meta["trust_score"]
+    status = trust_meta["status"]
+    status_label = trust_meta["status_label"]
+
+    mod_list = list(modalities_analyzed.keys())
+    mod_str = ", ".join([m.upper() for m in mod_list])
+    if fused_risk > 50.0:
+        fused_explanation = f"Cross-modal fusion evaluated {len(mod_list)} signals ({mod_str}). Suspicious manipulation or synthetic fraud indicators detected. Peak modality risk reached {max_risk:.1f}/100."
+    elif fused_risk > 25.0:
+        fused_explanation = f"Cross-modal fusion evaluated {len(mod_list)} signals ({mod_str}). Moderate caution advised due to borderline indicators or compression variance."
+    else:
+        fused_explanation = f"Cross-modal fusion verified consistent authentic signatures across all {len(mod_list)} analyzed modalities ({mod_str}). Trust score: {trust_score}/100."
+
+    record_scan(
+        scan_type="multimodal",
+        content_label=f"Multimodal ({mod_str})",
+        classification=status,
+        confidence=fused_conf,
+        risk_score=fused_risk,
+        risk_level=trust_meta["risk_level"],
+        trust_score=trust_score,
+        trust_category=trust_meta["trust_category"],
+        user_id=u_id,
+        explanation=fused_explanation,
+        indicators_json=json.dumps(indicators_all)
+    )
+
+    min_risk = min(risk_scores) if risk_scores else 0.0
+    cross_modal_divergence = round(abs(max_risk - min_risk), 1)
+    fusion_strategy = "Weighted Peak-Average Cross-Modal Decision Fusion (65% Peak / 35% Modality Mean)"
+
+    return {
+        "success": True,
+        "modality": "multimodal",
+        "modalities_analyzed": mod_list,
+        "status": status,
+        "status_label": status_label,
+        "classification": status,
+        "confidence": fused_conf,
+        "confidence_pct": fused_conf,
+        "trust_score": trust_score,
+        "trust_category": trust_meta["trust_category"],
+        "risk_score": fused_risk,
+        "risk_level": trust_meta["risk_level"],
+        "authenticity": round(100.0 - fused_risk, 1),
+        "authenticity_probability": round(100.0 - fused_risk, 1),
+        "explanation": fused_explanation,
+        "evidence": evidence_collected,
+        "indicators": indicators_all,
+        "signals": indicators_all,
+        "modalities": modalities_analyzed,
+        "cross_modal_divergence": cross_modal_divergence,
+        "fusion_strategy": fusion_strategy
+    }
+
+
+# ============================================================
+# 11. CYBERSECURITY AI ASSISTANT
+# ============================================================
+
+@app.post("/api/assistant")
+async def assistant_endpoint(request: Request):
+    data = await extract_request_data(request)
+    query = data.get("query", "") or data.get("message", "") or data.get("prompt", "") or data.get("question", "")
+    if not query:
+        raise HTTPException(status_code=400, detail="Query message required.")
+    scan_id = data.get("scan_id") or data.get("scanId")
+    context_data = data.get("context") or data.get("context_data")
+    if scan_id is not None:
+        try:
+            scan_id = int(scan_id)
+        except Exception:
+            scan_id = None
+    res = analyze_assistant_query(str(query), context_scan_id=scan_id, context_data=context_data)
+    return res
+
+
+# ============================================================
+# 12. COMPLIANCE & FORENSIC SECURITY REPORTS
+# ============================================================
+
+@app.get("/api/reports")
+def get_reports_endpoint(request: Request, limit: int = 50):
+    user = extract_user_from_request(request)
+    u_id = user["id"] if user else None
+    reports = get_reports(user_id=u_id, limit=limit)
+    return {"success": True, "reports": reports, "total": len(reports)}
+
+
+@app.post("/api/reports")
+async def create_report_endpoint(request: Request):
+    user = extract_user_from_request(request)
+    u_id = user["id"] if user else 1
+    data = await extract_request_data(request)
+    title = data.get("title") or "Forensic Security Audit Report"
+    report_type = data.get("report_type") or data.get("type") or "forensic_audit"
+    scan_id = data.get("scan_id")
+    summary = data.get("summary") or ""
+    metrics = data.get("metrics") or get_stats(user_id=u_id)
+    findings = data.get("findings") or []
+    rep = create_report(
+        title=str(title),
+        report_type=str(report_type),
+        user_id=u_id,
+        scan_id=scan_id,
+        summary=str(summary),
+        metrics=metrics,
+        findings=findings
+    )
+    return {"success": True, "report": rep}
+
+
+@app.get("/api/reports/{report_id}")
+def get_single_report_endpoint(report_id: str):
+    rep = get_report_by_id(report_id)
+    if not rep:
+        raise HTTPException(status_code=404, detail=f"Report {report_id} not found.")
+    return {"success": True, "report": rep}
 
 
 if __name__ == "__main__":

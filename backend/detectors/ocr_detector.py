@@ -1,3 +1,4 @@
+
 """
 OCR Document and Poster Fraud Detection Module for TrustGuard AI.
 Extracts text and key entities (Company, Email, Phone, Website, Salary, Registration Fee)
